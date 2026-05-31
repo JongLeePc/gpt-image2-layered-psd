@@ -29,29 +29,45 @@ The workflow is optimized for product posters, ecommerce images, social-media gr
 - requests
 - Optional: OpenCV / NumPy for local mask cleanup workflows
 - Codex skill runtime
-- A PSD assembly helper compatible with `bggg-creator-image2psd/scripts/image2psd.py`
 
-The bundled script delegates heavy semantic decomposition to a downstream local skill when available:
-
-```text
-~/.codex/skills/image2-ai-psd-layerizer/scripts/run_image2_psd.py
-```
-
-If that downstream skill is not installed, the instructions in `SKILL.md` can still be used as the workflow contract, but the included CLI will stop before decomposition.
-
-## Configuration
-
-Use environment variables:
+Install Python dependencies on the target device:
 
 ```powershell
-$env:GPT_IMAGE2_API_KEY = "..."
-$env:GPT_IMAGE2_BASE_URL = "https://api.openai.com/v1"
+python -m pip install -r .\scripts\requirements.txt
+```
+
+The skill bundles its own semantic layerizer and PSD writer:
+
+```text
+scripts/generate_layered_psd.py
+scripts/run_image2_psd.py
+scripts/image2psd.py
+```
+
+It does not require the private/local `image2-ai-psd-layerizer` or `bggg-creator-image2psd` skills on another device.
+
+## Required API Configuration
+
+On a new device, configure the third-party OpenAI-compatible gateway before running real extraction:
+
+```powershell
+$env:GPT_IMAGE2_API_KEY = "sk-..."
+$env:GPT_IMAGE2_BASE_URL = "https://your-openai-compatible-host/v1"
 $env:GPT_IMAGE2_MODEL = "gpt-image-2"
 ```
 
-`OPENAI_API_KEY` and `OPENAI_BASE_URL` are also supported as fallbacks.
+`OPENAI_API_KEY` and `OPENAI_BASE_URL` are also supported as fallbacks, but `GPT_IMAGE2_*` is preferred so the configuration is explicit for this skill.
 
 Do not commit API keys into this repository, prompts, manifests, logs, screenshots, or examples.
+
+If the API key is missing, the script exits with a clear message asking for `GPT_IMAGE2_API_KEY` or `OPENAI_API_KEY`. If the base URL is missing, the skill instructions tell Codex to ask the user for the third-party base URL before a real run.
+
+Optional advanced overrides:
+
+```powershell
+$env:GPT_IMAGE2_DOWNSTREAM_SCRIPT = "C:\path\to\custom\run_image2_psd.py"
+$env:GPT_IMAGE2_PSD_WRITER = "C:\path\to\custom\image2psd.py"
+```
 
 ## Usage
 
@@ -64,6 +80,16 @@ python .\scripts\generate_layered_psd.py `
   --max-layers 16
 ```
 
+Extract elements and stop for confirmation before PSD assembly:
+
+```powershell
+python .\scripts\generate_layered_psd.py `
+  --source C:\path\to\poster.png `
+  --slug poster_layer_test `
+  --max-layers 24 `
+  --extract-only
+```
+
 Offline structural smoke test:
 
 ```powershell
@@ -71,6 +97,15 @@ python .\scripts\generate_layered_psd.py `
   --prompt "mock poster" `
   --slug smoke_test `
   --mock-openai
+```
+
+Prepare only a standalone handoff project:
+
+```powershell
+python .\scripts\generate_layered_psd.py `
+  --source C:\path\to\poster.png `
+  --slug poster_layer_test `
+  --skip-downstream
 ```
 
 ## Output
