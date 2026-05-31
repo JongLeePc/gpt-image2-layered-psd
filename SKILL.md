@@ -1,11 +1,13 @@
 ---
-name: gpt-image2-layered-psd
-description: Analyze uploaded or existing images and convert them into separated element PNGs and editable layered PSD projects using GPT-Image2 through an OpenAI-compatible third-party Images API. Use when Codex needs to take a poster, product image, ecommerce graphic, social-media image, screenshot, cover, or flat design draft and produce semantic layers, Photoshop-ready PSD, layer PNGs, manifest files, and previews.
+name: psd-layer-extractor
+description: Process uploaded or local images into single semantic element PNGs and layered PSD files. Use whenever the user says PSD图层提取, use this skill, process an uploaded image, extract all image elements, split an image into PSD layers, create elements_contact_sheet.png for confirmation, or convert a poster/product/detail image into editable Photoshop layers. Default workflow is image to single element extraction to elements_contact_sheet.png confirmation to PSD assembly.
 ---
 
-# GPT-Image2 Layered PSD
+# PSD图层提取
 
-Use this skill for the workflow described as "image analysis + Thinking decomposition + element separation + PSD export": start from the user's uploaded image or an existing local image, analyze the visual elements, generate separate transparent element PNGs, then assemble a Photoshop-editable PSD project.
+Use this skill whenever the user says `PSD图层提取`, says to use this Skill, process an uploaded image, extract image elements, split a poster/product/detail image, or convert an image to PSD layers.
+
+Default workflow: start from the user's uploaded image or existing local image, extract all single semantic elements, generate `elements_contact_sheet.png` for review, wait for the user's confirmation, then assemble a Photoshop-editable PSD project. Do not ask the user to restate this workflow unless the image path or API configuration is missing.
 
 For occluded product elements, do not stop at visible-pixel cutout. Produce a complete reconstructed element when the user expects a standalone asset.
 
