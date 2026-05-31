@@ -20,10 +20,10 @@ from PIL import Image, ImageDraw
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_ROOT = SKILL_ROOT / "projects"
-DOWNSTREAM_ROOT = Path.home() / ".codex" / "skills" / "image2-ai-psd-layerizer"
-DOWNSTREAM_SCRIPT = DOWNSTREAM_ROOT / "scripts" / "run_image2_psd.py"
+BUNDLED_LAYERIZER = SKILL_ROOT / "scripts" / "run_image2_psd.py"
+LEGACY_DOWNSTREAM_ROOT = Path.home() / ".codex" / "skills" / "image2-ai-psd-layerizer"
+LEGACY_DOWNSTREAM_SCRIPT = LEGACY_DOWNSTREAM_ROOT / "scripts" / "run_image2_psd.py"
 
-DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-image-2"
 
 
@@ -54,6 +54,19 @@ def read_api_key(args: argparse.Namespace) -> str:
             "or use --mock-openai for an offline structural test."
         )
     return key
+
+
+def read_base_url(args: argparse.Namespace, *, mock_openai: bool) -> str:
+    base_url = args.base_url or os.environ.get("GPT_IMAGE2_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+    if not base_url:
+        if mock_openai:
+            return "mock://offline"
+        raise SystemExit(
+            "Missing API base URL. Set GPT_IMAGE2_BASE_URL to your third-party OpenAI-compatible base URL "
+            "(for example https://your-host/v1), or set it to https://api.openai.com/v1 if you explicitly "
+            "want official OpenAI."
+        )
+    return base_url.rstrip("/")
 
 
 def read_design_request(args: argparse.Namespace) -> dict[str, Any]:
@@ -168,12 +181,81 @@ def prepare_source_image(source_path: Path, project: Path) -> Path:
     return target
 
 
+def resolve_downstream_script(args: argparse.Namespace) -> Path | None:
+    configured = args.downstream_script or os.environ.get("GPT_IMAGE2_DOWNSTREAM_SCRIPT")
+    if configured:
+        path = Path(configured).expanduser().resolve()
+        return path if path.exists() else None
+    if BUNDLED_LAYERIZER.exists():
+        return BUNDLED_LAYERIZER
+    return LEGACY_DOWNSTREAM_SCRIPT if LEGACY_DOWNSTREAM_SCRIPT.exists() else None
+
+
+def create_standalone_handoff(project: Path, source: Path, reason: str) -> dict[str, Any]:
+    """Create install-safe output when no downstream layerizer is available.
+
+    This repository is a portable Codex skill. Full automatic semantic PSD
+    extraction is normally handled by the bundled layerizer in scripts/.
+    This fallback is kept for damaged or intentionally minimal installations.
+    """
+    handoff_dir = project / "standalone_handoff"
+    handoff_dir.mkdir(parents=True, exist_ok=True)
+    preview = handoff_dir / "source_preview.png"
+    Image.open(source).convert("RGBA").save(preview)
+
+    analysis = {
+        "status": "pending_semantic_decomposition",
+        "reason": reason,
+        "source": str(source),
+        "recommended_next_steps": [
+            "Analyze the source image into semantic elements.",
+            "Create transparent PNG layers for text, icons, products, photo cards, arrows, dimension marks, shadows, and background.",
+            "Show a contact sheet and wait for user confirmation before PSD assembly.",
+            "Assemble the PSD only after the confirmed element set is accepted.",
+        ],
+    }
+    (handoff_dir / "analysis_stub.json").write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+    (handoff_dir / "README.md").write_text(
+        "\n".join(
+            [
+                "# Standalone Handoff",
+                "",
+                "No layerizer script was found, so this run stopped after preparing the source image.",
+                "",
+                "Use `SKILL.md` as the workflow contract, reinstall the complete skill, or pass an explicit custom layerizer and rerun:",
+                "",
+                "```bash",
+                "python scripts/generate_layered_psd.py --source path/to/image.png --slug my_project",
+                "```",
+                "",
+                "The skill remains installed correctly; automatic decomposition is optional.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "mode": "standalone_handoff",
+        "status": "skipped_downstream",
+        "reason": reason,
+        "handoff_dir": str(handoff_dir),
+        "source_preview": str(preview),
+        "analysis_stub": str(handoff_dir / "analysis_stub.json"),
+    }
+
+
 def run_downstream_layerizer(args: argparse.Namespace, project: Path, source: Path, env: dict[str, str]) -> dict[str, Any]:
-    if not DOWNSTREAM_SCRIPT.exists():
-        raise SystemExit(f"Downstream layerizer not found: {DOWNSTREAM_SCRIPT}")
+    if args.skip_downstream:
+        return create_standalone_handoff(project, source, "--skip-downstream was set")
+    downstream_script = resolve_downstream_script(args)
+    if downstream_script is None:
+        return create_standalone_handoff(
+            project,
+            source,
+            "bundled layerizer was not found; reinstall the skill or pass --downstream-script",
+        )
     cmd = [
         sys.executable,
-        str(DOWNSTREAM_SCRIPT),
+        str(downstream_script),
         "--source",
         str(source),
         "--slug",
@@ -190,6 +272,8 @@ def run_downstream_layerizer(args: argparse.Namespace, project: Path, source: Pa
     if args.mock_openai:
         cmd.append("--mock-openai")
         cmd.append("--skip-4k-normalize")
+    if args.extract_only:
+        cmd.append("--extract-only")
     completed = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
     objects = parse_json_objects(completed.stdout)
     if objects:
@@ -227,22 +311,27 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--prompt", help="optional plain text prompt for generating a new source image first")
     parser.add_argument("--slug", required=True, help="project slug")
     parser.add_argument("--date", default=datetime.now().strftime("%Y%m%d"))
-    parser.add_argument("--base-url", default=os.environ.get("GPT_IMAGE2_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL)
+    parser.add_argument("--base-url", default=None, help="OpenAI-compatible API base URL; prefer GPT_IMAGE2_BASE_URL")
     parser.add_argument("--api-key", default=None, help="API key override; prefer environment variables to avoid shell history leaks")
     parser.add_argument("--model", default=os.environ.get("GPT_IMAGE2_MODEL", DEFAULT_MODEL))
     parser.add_argument("--size", default="1024x1536")
     parser.add_argument("--quality", default="high")
     parser.add_argument("--output-format", default="png", choices=["png", "jpeg", "webp"])
-    parser.add_argument("--max-layers", type=int, default=12)
+    parser.add_argument("--max-layers", type=int, default=24)
+    parser.add_argument("--downstream-script", default=None, help="optional path to a downstream semantic image-to-PSD layerizer")
+    parser.add_argument("--skip-downstream", action="store_true", help="prepare the project/source and stop before semantic decomposition")
+    parser.add_argument("--extract-only", action="store_true", help="extract element PNGs, contact sheet, and manifest, then stop before PSD assembly for user confirmation")
     parser.add_argument("--mock-openai", action="store_true", help="offline structural test; does not call APIs")
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
+    base_url = read_base_url(args, mock_openai=args.mock_openai)
     project = unique_project_dir(args.date, slugify(args.slug))
     env = os.environ.copy()
-    env["OPENAI_BASE_URL"] = args.base_url.rstrip("/")
+    env["GPT_IMAGE2_BASE_URL"] = base_url
+    env["OPENAI_BASE_URL"] = base_url
     env["IMAGE2_MODEL"] = args.model
 
     if args.source:
@@ -267,7 +356,7 @@ def main() -> int:
             env["OPENAI_API_KEY"] = api_key
             generation_meta = call_image_generation(
                 api_key=api_key,
-                base_url=args.base_url,
+                base_url=base_url,
                 model=args.model,
                 prompt=prompt,
                 size=args.size,
@@ -294,7 +383,7 @@ def main() -> int:
                 "# Process Notes",
                 "",
                 "Pipeline: source image -> semantic PSD layerizer -> separated element PNGs -> PSD assembly.",
-                f"Base URL: `{args.base_url.rstrip('/')}`",
+                f"Base URL: `{base_url}`",
                 f"Image model: `{args.model}`",
                 f"Size: `{args.size}`",
                 f"Quality: `{args.quality}`",
