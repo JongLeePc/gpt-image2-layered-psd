@@ -1,0 +1,10 @@
+projects/
+*.psd
+*.zip
+*.preview.png
+*.log
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
