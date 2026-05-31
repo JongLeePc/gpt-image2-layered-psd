@@ -1,4 +1,4 @@
 interface:
-  display_name: "GPT-Image2 Image Layerizer"
-  short_description: "Split images into PSD layers."
-  default_prompt: "Use GPT-Image2 Image Layerizer to analyze this uploaded image, separate visual elements into transparent PNGs, and assemble a Photoshop-ready PSD."
+  display_name: "PSD图层提取"
+  short_description: "Extract image elements, confirm, then build PSD."
+  default_prompt: "使用 PSD图层提取 处理上传图片：提取所有单一语义元素，生成 elements_contact_sheet.png 给我确认，确认后再合成 PSD。"
