@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-Image2 Image Layerizer"
+  short_description: "Split images into PSD layers."
+  default_prompt: "Use GPT-Image2 Image Layerizer to analyze this uploaded image, separate visual elements into transparent PNGs, and assemble a Photoshop-ready PSD."
