@@ -43,16 +43,37 @@ python ~/.codex/skills/gpt-image2-layered-psd/scripts/generate_layered_psd.py \
   --mock-openai
 ```
 
+Element-review extraction without PSD assembly:
+
+```bash
+python ~/.codex/skills/gpt-image2-layered-psd/scripts/generate_layered_psd.py \
+  --source /path/to/input.png \
+  --slug summer_poster \
+  --extract-only
+```
+
 ## Required Backend
 
-Default API base URL: `https://api.openai.com/v1`.
+On a newly installed device, do not assume provider credentials are already
+configured. Before a real API run, check:
+
+- `GPT_IMAGE2_API_KEY` or `OPENAI_API_KEY`
+- `GPT_IMAGE2_BASE_URL` or `OPENAI_BASE_URL`
+
+If either the API key or third-party base URL is missing, ask the user to
+provide it, then set it only in the current shell/session environment. Do not
+write secrets into the skill files, README, manifests, logs, screenshots, or
+examples.
+
+When the user explicitly wants official OpenAI, set the base URL to
+`https://api.openai.com/v1`.
 
 For OpenAI-compatible third-party image gateways, set `GPT_IMAGE2_BASE_URL`
 or pass `--base-url`.
 
 Default image model: `gpt-image-2`.
 
-Read the API key from `GPT_IMAGE2_API_KEY` first, then `OPENAI_API_KEY`. Do not hardcode API keys into skill files, prompts, manifests, or logs.
+Read the API key from `GPT_IMAGE2_API_KEY` first, then `OPENAI_API_KEY`.
 
 The script uses the OpenAI-compatible image generation format:
 
@@ -66,7 +87,11 @@ The script uses the OpenAI-compatible image generation format:
 }
 ```
 
-Endpoint: `<base_url>/images/generations`.
+Endpoints used by bundled scripts:
+
+- `<base_url>/images/generations` for optional source generation.
+- `<base_url>/images/edits` for restoration and transparent element extraction.
+- `<base_url>/responses` for semantic visual analysis.
 
 ## Workflow
 
@@ -75,12 +100,32 @@ Endpoint: `<base_url>/images/generations`.
 3. Decide extraction mode per element:
    - **Visible cutout**: preserve only pixels actually visible in the source image.
    - **Complete element**: reconstruct hidden/occluded portions so the element becomes a standalone usable asset.
-4. Run semantic PSD decomposition using `image2-ai-psd-layerizer` only after the single-element direction is accepted.
+4. Run semantic PSD decomposition using the bundled `scripts/run_image2_psd.py` only after the single-element direction is accepted.
 5. Generate transparent element PNGs for background, subject, text, badges, icons, decorations, shadows, and foreground objects where possible.
 6. Show a contact sheet and the element PNG directory to the user for review.
 7. Wait for explicit user confirmation that all elements are correct before assembling the PSD.
-8. Assemble the PSD and preview only after confirmation.
+8. Assemble the PSD and preview only after confirmation with `scripts/image2psd.py assemble --manifest <project>/manifest.json`.
 9. Inspect the preview and validation report before claiming production readiness.
+
+## Bundled Scripts
+
+This skill is self-contained for normal installation. It bundles:
+
+- `scripts/generate_layered_psd.py`: entrypoint for uploaded images or optional source generation.
+- `scripts/run_image2_psd.py`: semantic image analysis, element extraction, contact sheet generation, and optional PSD assembly.
+- `scripts/image2psd.py`: pure-Python raster PSD writer used for final assembly.
+
+The normal installed skill does not require `image2-ai-psd-layerizer` or
+`bggg-creator-image2psd` to exist on the target machine.
+
+Optional overrides are supported only for advanced local development:
+
+- `GPT_IMAGE2_DOWNSTREAM_SCRIPT` or `--downstream-script` to replace the bundled layerizer.
+- `GPT_IMAGE2_PSD_WRITER` to replace the bundled PSD writer.
+
+If a damaged/minimal installation is missing the bundled layerizer, the CLI
+creates a `standalone_handoff/` project instead of failing. Treat that as an
+installation problem to fix, not the final PSD workflow.
 
 ## Confirmed Single-Element PSD Workflow
 
@@ -154,15 +199,17 @@ The script creates a project under:
   process_notes.md
 ```
 
-It then delegates PSD layer extraction and assembly to:
+The bundled layerizer creates:
 
 ```text
-~/.codex/skills/image2-ai-psd-layerizer/projects/YYYYMMDD_slug_from_generation/
+~/.codex/skills/gpt-image2-layered-psd/projects/YYYYMMDD_slug_from_generation/
+  elements_contact_sheet.png
+  elements_cropped/
+  layer_sources/
   output.psd
   output.preview.png
   manifest.json
   validation_report.json
-  layer_sources/
   psd_full_canvas_layers.zip
 ```
 
