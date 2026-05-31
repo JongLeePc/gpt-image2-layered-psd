@@ -1,0 +1,9 @@
+Pillow>=10
+requests>=2.31
+numpy>=1.24
+
+# Optional, improves light foreground alpha preservation in image2psd.py.
+opencv-python>=4.6
+
+# Optional, used by image2psd.py split-colors --method kmeans.
+scikit-learn>=1.2
