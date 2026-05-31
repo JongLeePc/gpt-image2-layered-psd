@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 import numpy as np
 
 
@@ -25,6 +25,25 @@ PROJECTS_ROOT = SKILL_ROOT / "projects"
 BUNDLED_IMAGE2PSD = SKILL_ROOT / "scripts" / "image2psd.py"
 LEGACY_BGGG_ROOT = Path.home() / ".codex" / "skills" / "bggg-creator-image2psd"
 LEGACY_IMAGE2PSD = LEGACY_BGGG_ROOT / "scripts" / "image2psd.py"
+
+
+def load_local_env() -> None:
+    for name in (".env.local", ".env"):
+        path = SKILL_ROOT / name
+        if not path.exists():
+            continue
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+load_local_env()
 
 OPENAI_BASE_URL = (os.environ.get("GPT_IMAGE2_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
 
@@ -64,6 +83,13 @@ Rules:
   dimensions, photo cards, swatches, wheels, platforms, stairs, and shadows.
 - Each layer must be one semantic element, not a rectangular crop of the poster.
 - Do not merge unrelated nearby objects into one layer just because they touch.
+- For ecommerce detail images, split packaging/product objects, arrows, title
+  text, weight text, dimension text, dimension lines, logos, handling icons, and
+  each bottom thumbnail/photo card into separate layers.
+- Never merge dimension lines or dimension text into a product/carton layer.
+- Never merge weight labels or top headline text into photo/card layers.
+- If a row contains multiple thumbnail photos, each photo card must be its own
+  full rectangular element with tight bbox around only that thumbnail.
 - Bboxes must use pixel coordinates in the image coordinate system.
 - Layer order must be bottom-to-top.
 - Do not invent text. If text is uncertain, state uncertainty in the text field."""
@@ -257,20 +283,6 @@ def largest_size_for(path: Path) -> str:
     return "1536x1024" if width > height else "1024x1536"
 
 
-def normalize_to_4k(source: Path, output: Path) -> tuple[int, int]:
-    image = Image.open(source).convert("RGBA")
-    width, height = image.size
-    long_edge = max(width, height)
-    if long_edge >= 3840:
-        shutil.copy2(source, output)
-        return (width, height)
-    scale = 3840 / long_edge
-    new_size = (round(width * scale), round(height * scale))
-    upscaled = image.resize(new_size, Image.Resampling.LANCZOS)
-    upscaled.save(output)
-    return new_size
-
-
 def sanitize_layer_name(name: str, index: int) -> str:
     safe = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]+", "_", name).strip("_")
     return safe[:64] or f"Layer_{index:02d}"
@@ -282,7 +294,7 @@ def create_background(path: Path, size: tuple[int, int], color: str) -> None:
 
 
 def build_manifest(project: Path, analysis: dict[str, Any], background_color: str) -> Path:
-    restored = project / "restored" / "restored_4k.png"
+    restored = project / "restored" / "restored_image2.png"
     width, height = Image.open(restored).size
     layers = [
         {
@@ -430,6 +442,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Direct OpenAI image-to-PSD pipeline")
     parser.add_argument("--source", required=True, help="input product/poster/screenshot image")
     parser.add_argument("--slug", required=True, help="project slug")
+    parser.add_argument("--project-dir", help="resume or write into an existing project directory")
     parser.add_argument("--date", default=datetime.now().strftime("%Y%m%d"))
     parser.add_argument("--image-model", default=os.environ.get("IMAGE2_MODEL", "gpt-image-2"))
     parser.add_argument("--vision-model", default=os.environ.get("IMAGE2_VISION_MODEL", "gpt-5.2"))
@@ -437,7 +450,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--quality", default="high")
     parser.add_argument("--background", default="#ffffff")
     parser.add_argument("--max-layers", type=int, default=24)
-    parser.add_argument("--skip-4k-normalize", action="store_true")
+    parser.add_argument("--restore-image", action="store_true", help="call image edit API to restore source before analysis; slower and may alter exact layout")
+    parser.add_argument("--local-simple-layers", action="store_true", default=True, help="extract text/icon/simple graphic layers locally from analysis bboxes")
+    parser.add_argument("--no-local-simple-layers", dest="local_simple_layers", action="store_false", help="force every layer through the image edit API")
     parser.add_argument("--extract-only", action="store_true", help="write element PNGs, contact sheet, and manifest, then stop before PSD assembly")
     parser.add_argument("--mock-openai", action="store_true", help="offline self-test mode; does not call OpenAI")
     return parser
@@ -495,6 +510,108 @@ def mock_layer_from_bbox(source: Path, output: Path, bbox: list[int]) -> None:
     layer.save(output)
 
 
+def clamp_bbox(bbox: list[Any], size: tuple[int, int], padding: int = 0) -> tuple[int, int, int, int]:
+    width, height = size
+    if len(bbox) != 4:
+        return (0, 0, 0, 0)
+    x1, y1, x2, y2 = [int(round(float(v))) for v in bbox]
+    return (
+        max(0, x1 - padding),
+        max(0, y1 - padding),
+        min(width, x2 + padding),
+        min(height, y2 + padding),
+    )
+
+
+def should_extract_locally(layer: dict[str, Any]) -> bool:
+    layer_type = str(layer.get("type", "")).lower()
+    name = str(layer.get("name", "")).lower()
+    if layer_type in {"title_text", "info_text", "icon", "decoration"}:
+        return True
+    return any(
+        token in name
+        for token in [
+            "text",
+            "label",
+            "icon",
+            "check",
+            "tick",
+            "logo",
+            "wordmark",
+            "subtitle",
+            "dimension",
+            "arrow",
+            "photo",
+            "warehouse",
+            "crate",
+            "forklift",
+        ]
+    )
+
+
+def local_simple_layer_from_bbox(source: Path, output: Path, bbox: list[Any], layer_type: str) -> None:
+    image = Image.open(source).convert("RGBA")
+    width, height = image.size
+    padding = 4 if layer_type in {"title_text", "info_text"} else 2
+    x1, y1, x2, y2 = clamp_bbox(bbox, (width, height), padding=padding)
+    layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    if x2 <= x1 or y2 <= y1:
+        layer.save(output)
+        return
+
+    crop = image.crop((x1, y1, x2, y2)).convert("RGBA")
+    name_hint = output.stem.lower()
+    if any(token in name_hint for token in ["photo", "warehouse", "crate", "forklift"]):
+        arr = np.asarray(crop.convert("RGBA"), dtype=np.uint8)
+        rgb = arr[:, :, :3].astype(np.int16)
+        alpha = arr[:, :, 3]
+        brightness = rgb.mean(axis=2)
+        spread = rgb.max(axis=2) - rgb.min(axis=2)
+        non_white = ((brightness < 246) | (spread > 10)) & (alpha > 0)
+        row_counts = non_white.sum(axis=1)
+        col_counts = non_white.sum(axis=0)
+        rows = np.where(row_counts > max(4, int(crop.width * 0.18)))[0]
+        cols = np.where(col_counts > max(4, int(crop.height * 0.18)))[0]
+        if len(rows) and len(cols):
+            top, bottom = int(rows[0]), int(rows[-1]) + 1
+            left, right = int(cols[0]), int(cols[-1]) + 1
+            x1 += left
+            y1 += top
+            crop = crop.crop((left, top, right, bottom))
+        layer.alpha_composite(crop, (x1, y1))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        layer.save(output)
+        return
+
+    arr = np.asarray(crop, dtype=np.uint8)
+    rgb = arr[:, :, :3].astype(np.int16)
+    alpha = arr[:, :, 3]
+    brightness = rgb.mean(axis=2)
+    spread = rgb.max(axis=2) - rgb.min(axis=2)
+    maxc = rgb.max(axis=2)
+    minc = rgb.min(axis=2)
+    saturation = np.where(maxc > 0, (maxc - minc) / np.maximum(maxc, 1), 0)
+
+    if any(token in name_hint for token in ["arrow"]):
+        mask = (saturation > 0.35) & (brightness > 45)
+    elif any(token in name_hint for token in ["dimension", "line", "230mm", "425mm", "463mm"]):
+        mask = (brightness < 105) | ((saturation > 0.35) & (brightness > 35))
+    elif layer_type == "icon":
+        mask = (brightness < 120) | ((saturation > 0.28) & (brightness > 35)) | (brightness > 230)
+    else:
+        # Text on product photos is usually dark ink on cardboard, white text on
+        # dark backgrounds, or colored marks. Avoid selecting the cardboard fill.
+        mask = (brightness < 120) | (brightness > 235) | ((saturation > 0.32) & (brightness > 35))
+    mask &= alpha > 0
+
+    mask_img = Image.fromarray((mask.astype(np.uint8) * 255), "L")
+    mask_img = mask_img.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.GaussianBlur(0.6))
+    crop.putalpha(mask_img)
+    layer.alpha_composite(crop, (x1, y1))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    layer.save(output)
+
+
 def main() -> int:
     args = build_parser().parse_args()
     api_key = "mock" if args.mock_openai else require_api_key()
@@ -505,45 +622,45 @@ def main() -> int:
         raise SystemExit(f"source not found: {source}")
     image2psd_script = resolve_image2psd_script()
 
-    project = unique_project_dir(args.date, slugify(args.slug))
+    project = Path(args.project_dir).expanduser().resolve() if args.project_dir else unique_project_dir(args.date, slugify(args.slug))
     for subdir in ["original", "restored", "analysis", "layer_sources", "psd_full_canvas_layers", "diagnostics"]:
         (project / subdir).mkdir(parents=True, exist_ok=True)
     original = project / "original" / "input.png"
-    ImageOps.exif_transpose(Image.open(source)).convert("RGBA").save(original)
+    if not original.exists():
+        ImageOps.exif_transpose(Image.open(source)).convert("RGBA").save(original)
 
     size = largest_size_for(original) if args.image_size == "auto" else args.image_size
     restored_image2 = project / "restored" / "restored_image2.png"
-    restored_4k = project / "restored" / "restored_4k.png"
     native_layers_dir = project / "diagnostics" / "native_layer_sources"
     native_layers_dir.mkdir(parents=True, exist_ok=True)
 
     errors: list[str] = []
-    if args.mock_openai:
-        shutil.copy2(original, restored_image2)
+    if not restored_image2.exists():
+        if args.mock_openai or not args.restore_image:
+            shutil.copy2(original, restored_image2)
+        else:
+            call_image_edit(
+                api_key,
+                args.image_model,
+                original,
+                RESTORE_PROMPT,
+                restored_image2,
+                size=size,
+                transparent=False,
+                quality=args.quality,
+            )
+    analysis_path = project / "analysis" / "analysis.json"
+    if analysis_path.exists():
+        analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
     else:
-        call_image_edit(
-            api_key,
-            args.image_model,
-            original,
-            RESTORE_PROMPT,
-            restored_image2,
-            size=size,
-            transparent=False,
-            quality=args.quality,
-        )
-    if args.skip_4k_normalize:
-        shutil.copy2(restored_image2, restored_4k)
-    else:
-        normalize_to_4k(restored_image2, restored_4k)
-
-    analysis = mock_analysis_for(restored_image2) if args.mock_openai else call_responses_analysis(api_key, args.vision_model, restored_image2)
+        analysis = mock_analysis_for(restored_image2) if args.mock_openai else call_responses_analysis(api_key, args.vision_model, restored_image2)
     analysis_layers = analysis.get("layers", [])
     if not isinstance(analysis_layers, list) or not analysis_layers:
         raise RuntimeError("analysis produced no layers")
     analysis["layers"] = sorted(analysis_layers, key=lambda item: item.get("order", 999))[: args.max_layers]
-    (project / "analysis" / "analysis.json").write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+    analysis_path.write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    width, height = Image.open(restored_4k).size
+    width, height = Image.open(restored_image2).size
     create_background(project / "layer_sources" / "00_background.png", (width, height), args.background)
 
     semantic_layers = [item for item in analysis["layers"] if str(item.get("type", "")).lower() != "background"]
@@ -570,8 +687,17 @@ Requirements:
         try:
             native_layer_path = native_layers_dir / filename
             final_layer_path = project / "layer_sources" / filename
+            if final_layer_path.exists() and final_layer_path.stat().st_size > 0:
+                continue
             if args.mock_openai:
                 mock_layer_from_bbox(restored_image2, native_layer_path, layer.get("bbox", []))
+            elif args.local_simple_layers and should_extract_locally(layer):
+                local_simple_layer_from_bbox(
+                    restored_image2,
+                    native_layer_path,
+                    layer.get("bbox", []),
+                    str(layer.get("type", "")).lower(),
+                )
             else:
                 try:
                     call_image_edit(
@@ -599,10 +725,7 @@ Requirements:
                         quality=args.quality,
                     )
                     white_to_alpha(native_layer_path)
-            if args.skip_4k_normalize:
-                shutil.copy2(native_layer_path, final_layer_path)
-            else:
-                normalize_to_4k(native_layer_path, final_layer_path)
+            shutil.copy2(native_layer_path, final_layer_path)
         except Exception as exc:
             errors.append(f"layer {idx} {name}: {exc}")
 
@@ -622,7 +745,7 @@ Requirements:
             [
                 "# Process Notes",
                 "",
-                "Pipeline: OpenAI image restoration -> OpenAI semantic analysis -> OpenAI transparent layer generation -> PSD assembly.",
+                "Pipeline: OpenAI image restoration -> OpenAI semantic analysis -> optimized layer generation -> PSD assembly.",
                 f"Image model: `{args.image_model}`",
                 f"Vision model: `{args.vision_model}`",
                 f"Image API size: `{size}`",
