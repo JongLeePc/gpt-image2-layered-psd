@@ -1,4 +1,4 @@
-# GPT-Image2 Layered PSD Skill
+# PSD图层提取 Skill
 
 Codex skill for converting a flat design image into confirmed single-element PNGs and Photoshop-ready layered PSD projects.
 
