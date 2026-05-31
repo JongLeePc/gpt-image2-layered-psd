@@ -27,6 +27,25 @@ LEGACY_DOWNSTREAM_SCRIPT = LEGACY_DOWNSTREAM_ROOT / "scripts" / "run_image2_psd.
 DEFAULT_MODEL = "gpt-image-2"
 
 
+def load_local_env() -> None:
+    for name in (".env.local", ".env"):
+        path = SKILL_ROOT / name
+        if not path.exists():
+            continue
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+load_local_env()
+
+
 def slugify(value: str) -> str:
     text = value.strip().lower()
     text = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "_", text)
@@ -271,7 +290,6 @@ def run_downstream_layerizer(args: argparse.Namespace, project: Path, source: Pa
     ]
     if args.mock_openai:
         cmd.append("--mock-openai")
-        cmd.append("--skip-4k-normalize")
     if args.extract_only:
         cmd.append("--extract-only")
     completed = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
